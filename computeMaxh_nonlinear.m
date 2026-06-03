@@ -1,183 +1,159 @@
 function [maxh_matrix, AngleALL] = computeMaxh_nonlinear(clstack, corrstack, K, p, method, sigma, a)
-% Nonlinear weighted method for computing angle between equivalent lines
-% method: 'gaussian' or 'sigmoid', specifies the weighting method
-% sigma: for gaussian weighting, controls the width of the gaussian function
-% threshold: the threshold for correlation to apply non-zero weights
-% a: parameter for sigmoid function
+% Nonlinear weighted voting for computing common line reliability
+% Implements: w_ij^k = f(H_ik) * f(H_jk)  (product of two supporting CL reliabilities)
+% method: 'sigmoid' | 'tanh' | 'linear' | 'power' | 'gaussian'
+% p    : percentile for threshold (applied to maxh_matrix_old)
+% a    : steepness for sigmoid/tanh, exponent for power
+% sigma: width for gaussian
 
-% Initialize matrices
+% Initialize
 maxh_matrix = zeros(K, K);
-AngleALL = zeros(K, K);
-weight = ones(K, K, K, 'double'); % Initialize weights to 1
-T = 60;
+AngleALL    = zeros(K, K);
+T   = 60;
 tho = 180 / T;
-count=0;
+count = 0;
 
-% Compute initial maxh_matrix using original method
+% Stage 1: uniform-weight initialization
 maxh_matrix_old = computeMaxhandSts_ang(clstack, corrstack, K);
-%load('maxh_matrix_old_SNR8.mat');
 
-% ========== 新增：迭代控制参数 ==========
-max_iter = 30;                    % 最大迭代次数
-patience = 5;                     % 振荡检测窗口
-relative_std_threshold = 0.01;    % 相对标准差阈值（1%）
-error_history = [];               % 记录误差历史
-% =======================================
-%原先的
-Thresh = prctile(maxh_matrix_old, p, 'all');
+% Iteration control
+max_iter               = 30;
+patience               = 5;
+relative_std_threshold = 0.01;
+error_history          = [];
 
+% Threshold fixed from first iteration (percentile of maxh)
+Thresh = prctile(maxh_matrix_old(:), p);
+fprintf('Thresh = %.4f  (p=%d percentile of maxh_matrix_old)\n', Thresh, p);
 
+sum_countW_old     = 0;
+sum_maxh_matrix_old = sum(maxh_matrix_old(:));
 
-flagW = 1;
-sum_countW_old=0;
-sum_maxh_matrix_old = sum(sum(maxh_matrix_old));
-% Iteration for updating weights and computing angles
 while count < max_iter
     sum_countW = 0;
-    
+
     for k1 = 1:K-1
         for k2 = k1+1:K
-            h = zeros(1, T);
-            angles = -1 * ones(1, K);
+            h      = zeros(1, T);
             countW = 0;
-            
+            sum_w  = 0;
 
-            
-            
             for k3 = 1:K
                 if k3 == k1 || k3 == k2
                     continue;
                 end
-                
-                % Update weight based on the chosen method
-                %if method == 'gaussian'
-                     %weight(k1, k2, k3) = exp(- (corrstack(k1, k3) - Thresh)^2 / (2 * sigma^2));
-                % elseif method == 'sigmoid'
-                     weight(k1, k2, k3) = 1 / (1 + exp(-a * (corrstack(k1, k3) - Thresh)));
-                     %weight(k1, k2, k3) = 1/(1+exp(-a*(maxh_matrix_old(k1,k3) - Thresh)));
-                % end
-                %if method == 'tanh'
-                      %weight(k1, k2, k3) = 0.5 * (1 + tanh(a * (corrstack(k1, k3) - Thresh)));
-                      %weight(k1, k2, k3) = 0.5 * (1 + tanh(a * (corrstack(k1, k3) - Thresh_corr)));
-                % elseif strcmp(method, 'power')
-                 %if corrstack(k1, k3) >= Thresh
-                    %normalized_corr = (corrstack(k1, k3) - Thresh) / (1 - Thresh);
-                    %weight(k1, k2, k3) = normalized_corr^a;  % a在power方法中代表幂次
-                 %else
-                    %weight(k1, k2, k3) = 0;
-                 %end
-                
-                if maxh_matrix_old(k1, k3) > Thresh && maxh_matrix_old(k2, k3) > Thresh
+
+                % Gate: both supporting common lines must be reliable
+                if maxh_matrix_old(k1,k3) > Thresh && maxh_matrix_old(k2,k3) > Thresh
+
+                    % === Weight: f(H_ik) * f(H_jk)  (paper Eq.7-8) ===
+                    H_ik = maxh_matrix_old(k1, k3);
+                    H_jk = maxh_matrix_old(k2, k3);
+
+                    if strcmp(method, 'sigmoid')
+                        w_ik = 1 / (1 + exp(-a * (H_ik - Thresh)));
+                        w_jk = 1 / (1 + exp(-a * (H_jk - Thresh)));
+
+                    elseif strcmp(method, 'tanh')
+                        w_ik = 0.5 * (1 + tanh(a * (H_ik - Thresh)));
+                        w_jk = 0.5 * (1 + tanh(a * (H_jk - Thresh)));
+
+                    elseif strcmp(method, 'linear')
+                        % linear: w = H directly (maxh is already in [0,1])
+                        w_ik = H_ik;
+                        w_jk = H_jk;
+
+                    elseif strcmp(method, 'power')
+                        norm_ik = (H_ik - Thresh) / (1 - Thresh);
+                        norm_jk = (H_jk - Thresh) / (1 - Thresh);
+                        w_ik = norm_ik ^ a;
+                        w_jk = norm_jk ^ a;
+
+                    elseif strcmp(method, 'gaussian')
+                        w_ik = exp(-(H_ik - Thresh)^2 / (2 * sigma^2));
+                        w_jk = exp(-(H_jk - Thresh)^2 / (2 * sigma^2));
+
+                    else
+                        error('Unknown method: %s', method);
+                    end
+
+                    wk = w_ik * w_jk;   % product (paper Eq.8)
                     countW = countW + 1;
-                    
-             
-                    
-                    
+                    sum_w  = sum_w  + wk;
+
                 else
-                    weight(k1, k2, k3) = 0;
+                    wk = 0;
                 end
-                     %countW = countW + 1;
-                
-                
-                % Compute angle using current weight
-                [angle12, flag] = ComputeAngleCorr(clstack(k1, k2), clstack(k2, k1), corrstack(k1, k2), clstack(k1, k3), clstack(k3, k1), corrstack(k1, k3), clstack(k2, k3), clstack(k3, k2), corrstack(k2, k3));
-                angles(k3) = angle12;
-                
-                if flag
+
+                % Compute dihedral angle estimate
+                [angle12, flag] = ComputeAngleCorr( ...
+                    clstack(k1,k2), clstack(k2,k1), corrstack(k1,k2), ...
+                    clstack(k1,k3), clstack(k3,k1), corrstack(k1,k3), ...
+                    clstack(k2,k3), clstack(k3,k2), corrstack(k2,k3));
+
+                if flag && wk > 0
                     ang = (1:T) * 180.0 / T;
-                    h = h + double(weight(k1, k2, k3)) * exp(-(ang - angle12).^2 / (2 * tho * tho)); % Nonlinear weighted voting
+                    h   = h + wk * exp(-(ang - angle12).^2 / (2 * tho * tho));
                 end
             end
-            
-            %if(countW == 0)
-                %flagW = 0;
-                %break;
-            if(countW == 0)
-                maxh_matrix(k1, k2) = 0;  
-                maxh_matrix(k2, k1) = 0;
+
+            % Normalize by total weight (paper Eq.5)
+            if countW == 0 || sum_w == 0
+                maxh_matrix(k1,k2) = 0;
+                maxh_matrix(k2,k1) = 0;
                 continue;
             else
-                
-                h = h./countW; % Modified by Lu
-                sum_countW = sum_countW+countW;
-                
+                h = h ./ sum_w;
+                sum_countW = sum_countW + countW;
             end
 
-            [maxh,idx] = max(h);
-            
-            
-            ang = idx*tho - tho/2;
-            maxh_matrix(k1, k2) = maxh;
-            maxh_matrix(k2, k1) = maxh;
-            
-            AngleALL(k1, k2) = ang;
-            AngleALL(k2, k1) = ang;
+            [maxh, idx] = max(h);
+            ang = idx * tho - tho / 2;
 
+            maxh_matrix(k1,k2) = maxh;
+            maxh_matrix(k2,k1) = maxh;
+            AngleALL(k1,k2)    = ang;
+            AngleALL(k2,k1)    = ang;
         end
-        
-        %if(flagW == 0)
-           % break;
-        %end
-
     end
-    
-      % ========== 新增：振荡检测 ==========
+
+    % Convergence check
     current_error = max(max(abs(maxh_matrix - maxh_matrix_old)));
     error_history = [error_history; current_error];
-    
-    % 检查振荡（只在积累够数据后）
+
     oscillation_detected = false;
     if length(error_history) >= patience
         recent_errors = error_history(end-patience+1:end);
-        recent_mean = mean(recent_errors);
-        recent_std = std(recent_errors);
-        relative_std = recent_std / recent_mean;
-        
-        if relative_std < relative_std_threshold
-            fprintf('振荡检测: 最近%d次误差mean=%.6f, std=%.6f, 相对std=%.2f%% < %.2f%%\n', ...
-                    patience, recent_mean, recent_std, relative_std*100, relative_std_threshold*100);
+        recent_mean   = mean(recent_errors);
+        recent_std    = std(recent_errors);
+        if recent_mean > 0 && (recent_std / recent_mean) < relative_std_threshold
+            fprintf('Oscillation detected: mean=%.6f  rel_std=%.2f%%\n', ...
+                recent_mean, (recent_std/recent_mean)*100);
             oscillation_detected = true;
         end
     end
-    % =====================================
-    
-    %fprintf('max(maxh_matrix_old)==%f,   max(maxh_matrix)== %f,   error==%f\n',max(max(maxh_matrix_old)), max(max(maxh_matrix)), max(max(abs(maxh_matrix - maxh_matrix_old))));
-    % =====================================
-    
-    fprintf('max(maxh_matrix_old)==%f,   max(maxh_matrix)== %f,   error==%f\n', ...
-            max(max(maxh_matrix_old)), max(max(maxh_matrix)), current_error);
-    
-    % 修改：添加振荡检测到终止条件
-    %if  (flagW == 0) || oscillation_detected
-    if  (current_error < 0.01) ||(flagW == 0) || oscillation_detected
-        fprintf('终止原因: error<0.06=%d, flagW=0=%d, oscillation=%d\n', ...
-            current_error<0.06, flagW==0, oscillation_detected);
+
+    fprintf('[iter %d]  max_old=%.4f  max_new=%.4f  error=%.6f\n', ...
+        count+1, max(maxh_matrix_old(:)), max(maxh_matrix(:)), current_error);
+
+    % Convergence criterion (paper Eq.9): error < 1% of current max
+    converged = current_error < 0.01 * max(maxh_matrix_old(:));
+
+    if converged || oscillation_detected
+        fprintf('Converged at iter %d\n', count+1);
         break;
-    %if(max(max(abs(maxh_matrix - maxh_matrix_old)))<0.06) || (flagW == 0)
-    %if (sum_countW_old == sum_countW)
-       % break;
     else
-        sum_maxh_matrix = sum(sum(maxh_matrix));
-        fprintf('sum_countW_old==%f,   sum_countW==%f\n',sum_countW_old,sum_countW);
-        fprintf('sum_maxh_matrix_old== %f,   sum_maxh_matrix==%f\n',sum_maxh_matrix_old, sum_maxh_matrix);
-        maxh_matrix_old = maxh_matrix;
+        sum_maxh_matrix = sum(maxh_matrix(:));
+        fprintf('sum_countW: %d -> %d\n', sum_countW_old, sum_countW);
+        fprintf('sum_maxh:   %.4f -> %.4f\n', sum_maxh_matrix_old, sum_maxh_matrix);
+        maxh_matrix_old     = maxh_matrix;
         sum_maxh_matrix_old = sum_maxh_matrix;
-        sum_countW_old = sum_countW;
-        count= count+1;
-        fprintf('iter==%f\n',count);
-        %figure; imagesc(maxh_matrix);
-        %figure; histogram(maxh_matrix);
+        sum_countW_old      = sum_countW;
+        count = count + 1;
     end
 end
-% 新增：最终输出信息
-fprintf('========== 迭代完成 ==========\n');
-fprintf('总迭代次数: %d\n', count);
-fprintf('最终误差: %.6f\n', current_error);
-if  oscillation_detected
-    fprintf('终止原因: 检测到稳定振荡\n');
-elseif count >= max_iter
-    fprintf('终止原因: 达到最大迭代次数\n');
-end
-fprintf('==============================\n');
+
+fprintf('========== Done: %d iterations ==========\n', count);
+fprintf('Final error: %.6f\n', current_error);
 
 end
